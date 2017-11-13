@@ -12,6 +12,7 @@
 
 #include <limits.h>
 #include "lib/u2s.h"
+#include "lib/vtoc.h"
 
 /********************************************************************************
  * SECTION: Definitions needed for DASD-API (see dasd.h)
@@ -197,9 +198,6 @@ struct dasd_eckd_characteristics {
 #define SEEK_STEP 4194304LL
 #define DUMP_STRING_SIZE 1024LL
 
-#define ERROR_STRING_SIZE 1024
-static char error_str[ERROR_STRING_SIZE];
-
 enum dasdview_failure {
 	open_error,
 	seek_error,
@@ -265,5 +263,9 @@ typedef struct dasdview_info
 	struct dasd *dasd;
 
 } dasdview_info_t;
+
+int dasdview_get_info(dasdview_info_t *info);
+
+void zt_error_print(const char *fmt, ...);
 
 #endif /* DASDVIEW_H */

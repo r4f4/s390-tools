@@ -7,33 +7,22 @@
  * it under the terms of the MIT license. See LICENSE for details.
  */
 
-#define _LARGEFILE64_SOURCE    /* needed for unistd.h */
-#define _FILE_OFFSET_BITS 64   /* needed for unistd.h */
-
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <getopt.h>
-#include <linux/version.h>
 #include <malloc.h>
-#include <stdarg.h>
+#include <linux/version.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <sys/utsname.h>
-#include <unistd.h>
 
 #include "lib/libzds.h"
-#include "lib/u2s.h"
 #include "lib/util_base.h"
 #include "lib/util_opt.h"
 #include "lib/util_prg.h"
-#include "lib/vtoc.h"
 #include "lib/zt_common.h"
 
-#include "dasdview.h"
+#include "lib/dasdview.h"
 
 /* Characters per line */
 #define DASDVIEW_CPL 16
@@ -108,20 +97,6 @@ static struct util_opt opt_vec[] = {
 	UTIL_OPT_END
 };
 
-/*
- * Generate and print an error message based on the formatted
- * text string FMT and a variable amount of extra arguments.
- */
-static void zt_error_print(const char *fmt, ...)
-{
-	va_list args;
-
-	va_start (args, fmt);
-	vsnprintf(error_str, ERROR_STRING_SIZE, fmt, args);
-	va_end (args);
-
-	fprintf(stderr, "Error: %s\n", error_str);
-}
 
 /*
  * replace special characters with dots and question marks
@@ -140,107 +115,6 @@ dot (char label[]) {
 		if (c == 0x60) label[i] = '?';
 		if (c >= 0x7f) label[i] = '?';
 	}
-}
-
-
-/*
- * Attempts to find the sysfs entry for the given busid and reads
- * the contents of a specified attribute to the buffer
- */
-static int dasdview_read_attribute(char *busid, char *attribute, char *buffer,
-				   size_t count)
-{
-	char path[100];
-	int rc, fd;
-	ssize_t rcount;
-
-	rc = 0;
-	snprintf(path, sizeof(path), "/sys/bus/ccw/devices/%s/%s",
-		 busid, attribute);
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		return errno;
-	rcount = read(fd, buffer, count);
-	if (rcount < 0)
-		rc = errno;
-	close(fd);
-	return rc;
-}
-
-static void
-dasdview_get_info(dasdview_info_t *info)
-{
-	int fd;
-	struct dasd_eckd_characteristics *characteristics;
-	char buffer[10];
-	int rc;
-
-	fd = open(info->device, O_RDONLY);
-	if (fd == -1)
-	{
-		zt_error_print("dasdview: open error\n" \
-			"Could not open device '%s'.\n"
-			"Maybe you have specified an unknown device or \n"
-			"you are not authorized to do that.\n",
-			info->device);
-		exit(-1);
-	}
-
-	/* get disk geometry */
-	if (ioctl(fd, HDIO_GETGEO, &info->geo) != 0)
-	{
-	        close(fd);
-		zt_error_print("dasdview: ioctl error\n" \
-			"Could not retrieve disk geometry " \
-			"information.");
-		exit(-1);
-	}
-
-	if (ioctl(fd, BLKSSZGET, &info->blksize) != 0)
-	{
-	        close(fd);
-		zt_error_print("dasdview: ioctl error\n" \
-			"Could not retrieve blocksize information!\n");
-		exit(-1);
-	}
-
-	/* get disk information */
-	if (ioctl(fd, BIODASDINFO2, &info->dasd_info) == 0) {
-		info->dasd_info_version = 2;
-	} else {
-		/* INFO2 failed - try INFO using the same (larger) buffer */
-		if (ioctl(fd, BIODASDINFO, &info->dasd_info) != 0) {
-			close(fd);
-			zt_error_print("dasdview: ioctl error\n"	\
-				       "Could not retrieve disk information.");
-			exit(-1);
-		}
-	}
-
-	characteristics = (struct dasd_eckd_characteristics *)
-		&info->dasd_info.characteristics;
-	if (characteristics->no_cyl == LV_COMPAT_CYL &&
-	    characteristics->long_no_cyl)
-		info->hw_cylinders = characteristics->long_no_cyl;
-	else
-		info->hw_cylinders = characteristics->no_cyl;
-	close(fd);
-
-
-	if(u2s_getbusid(info->device, info->busid) == -1)
-		info->busid_valid = 0;
-	else
-		info->busid_valid = 1;
-
-	rc = dasdview_read_attribute(info->busid, "raw_track_access", buffer,
-				sizeof(buffer));
-	if (rc) {
-		zt_error_print("dasdview: Could not retrieve raw_track_access"
-			       " mode information.");
-		return;
-	}
-	if ('1' == buffer[0])
-		info->raw_track_access = 1;
 }
 
 
@@ -2370,7 +2244,9 @@ int main(int argc, char * argv[]) {
 	if (info.device_id < argc)
 		strcpy(info.device, argv[info.device_id]);
 
-	dasdview_get_info(&info);
+	if (dasdview_get_info(&info) != 0)
+		exit(EXIT_FAILURE);
+
 	if (info.raw_track_access) {
 		rc = lzds_zdsroot_alloc(&info.zdsroot);
 		if (rc) {
