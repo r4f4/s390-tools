@@ -9,8 +9,10 @@
  * it under the terms of the MIT license. See LICENSE for details.
  */
 
+#include <err.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "lib/dasd_sys.h"
 
@@ -140,4 +142,101 @@ int dasd_reset_chpid(char *devnode, char *chpid_char)
 	fclose(fp);
 
 	return 0;
+}
+
+/*
+ * Get dasd info for device
+ *
+ * @param[in]	info	struct where info will be saved
+ * `info->device' must be initialized with the name of the device for which to
+ * get the dasd info
+ *
+ * @retval	-1	could not get dasd info
+ * @retval	0	dasd info obtained
+ */
+int dasd_get_info(dasd_info_t *info)
+{
+	int fd;
+	struct dasd_eckd_characteristics *characteristics;
+
+	fd = open(info->device, O_RDONLY);
+	if (fd == -1)
+	{
+		warnx("open error\n" \
+			"Could not open device '%s'.\n"
+			"Maybe you have specified an unknown device or \n"
+			"you are not authorized to do that.",
+			info->device);
+		return -1;
+	}
+
+	/* get disk geometry */
+	if (ioctl(fd, HDIO_GETGEO, &info->geo) != 0)
+	{
+		close(fd);
+		warnx("ioctl error\n" \
+			"Could not retrieve disk geometry " \
+			"information.");
+		return -1;
+	}
+
+	if (ioctl(fd, BLKSSZGET, &info->blksize) != 0)
+	{
+		close(fd);
+		warnx("ioctl error\n" \
+			"Could not retrieve blocksize information!");
+		return -1;
+	}
+
+	/* get disk information */
+	if (ioctl(fd, BIODASDINFO2, &info->dasd_info) == 0) {
+		info->dasd_info_version = 2;
+	} else {
+		/* INFO2 failed - try INFO using the same (larger) buffer */
+		if (ioctl(fd, BIODASDINFO, &info->dasd_info) != 0) {
+			close(fd);
+			warnx("ioctl error\n"	\
+					"Could not retrieve disk information.");
+			return -1;
+		}
+	}
+
+	characteristics = (struct dasd_eckd_characteristics *)
+		&info->dasd_info.characteristics;
+	if (characteristics->no_cyl == LV_COMPAT_CYL &&
+			characteristics->long_no_cyl)
+		info->hw_cylinders = characteristics->long_no_cyl;
+	else
+		info->hw_cylinders = characteristics->no_cyl;
+	close(fd);
+
+	if(u2s_getbusid(info->device, info->busid) == -1)
+		info->busid_valid = 0;
+	else
+		info->busid_valid = 1;
+
+	info->raw_track_access = dasd_sys_raw_track_access(info->device);
+
+	return 0;
+}
+
+void
+dasd_read_vlabel(dasd_info_t *info, volume_label_t *vlabel)
+{
+	volume_label_t tmp;
+	unsigned long  pos;
+
+	pos = info->dasd_info.label_block * info->blksize;
+
+	bzero(vlabel, sizeof(volume_label_t));
+	if ((strncmp(info->dasd_info.type, "ECKD", 4) == 0) &&
+	    (!info->dasd_info.FBA_layout)) {
+		/* OS/390 and zOS compatible disk layout */
+		vtoc_read_volume_label(info->device, pos, vlabel);
+	}
+	else {
+		/* standard LINUX disk layout */
+		vtoc_read_volume_label(info->device, pos, &tmp);
+		memcpy(vlabel->vollbl, &tmp, sizeof(tmp)-4);
+	}
 }

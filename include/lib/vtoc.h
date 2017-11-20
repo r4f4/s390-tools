@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <linux/hdreg.h>
 
 
 #define LINE_LENGTH 80
@@ -39,14 +40,6 @@
 #define LV_COMPAT_CYL 0xFFFE
 
 #define VTOC_ERROR "VTOC error:"
-
-/* definition from hdreq.h */
-struct hd_geometry {
-      unsigned char heads;
-      unsigned char sectors;
-      unsigned short cylinders;
-      unsigned long start;
-};
 
 typedef struct ttr 
 {

@@ -4,7 +4,8 @@ ALL_CPPFLAGS += -I../include -I../boot
 
 libs =	$(rootdir)/libdasd/libdasd.a \
 	$(rootdir)/libu2s/libu2s.a \
-	$(rootdir)/libutil/libutil.a
+	$(rootdir)/libutil/libutil.a \
+	$(rootdir)/libvtoc/libvtoc.a
 
 all: tunedasd
 

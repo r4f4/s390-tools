@@ -20,11 +20,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "lib/dasd_sys.h"
 #include "lib/libzds.h"
 #include "lib/u2s.h"
 #include "lib/util_base.h"
@@ -33,10 +33,20 @@
 #include "lib/vtoc.h"
 #include "lib/zt_common.h"
 
-#include "dasdview.h"
+/********************************************************************************
+ * SECTION: DASDVIEW internal types
+ *******************************************************************************/
 
 /* Characters per line */
 #define DASDVIEW_CPL 16
+
+#define DEFAULT_BEGIN 0
+#define DEFAULT_SIZE 128
+#define SEEK_STEP 4194304LL
+#define DUMP_STRING_SIZE 1024LL
+
+#define ERROR_STRING_SIZE 1024
+static char error_str[ERROR_STRING_SIZE];
 
 static const struct util_prg prg = {
 	.desc = "Display DASD and VTOC information and dump the content of "
@@ -143,109 +153,8 @@ dot (char label[]) {
 }
 
 
-/*
- * Attempts to find the sysfs entry for the given busid and reads
- * the contents of a specified attribute to the buffer
- */
-static int dasdview_read_attribute(char *busid, char *attribute, char *buffer,
-				   size_t count)
-{
-	char path[100];
-	int rc, fd;
-	ssize_t rcount;
-
-	rc = 0;
-	snprintf(path, sizeof(path), "/sys/bus/ccw/devices/%s/%s",
-		 busid, attribute);
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		return errno;
-	rcount = read(fd, buffer, count);
-	if (rcount < 0)
-		rc = errno;
-	close(fd);
-	return rc;
-}
-
 static void
-dasdview_get_info(dasdview_info_t *info)
-{
-	int fd;
-	struct dasd_eckd_characteristics *characteristics;
-	char buffer[10];
-	int rc;
-
-	fd = open(info->device, O_RDONLY);
-	if (fd == -1)
-	{
-		zt_error_print("dasdview: open error\n" \
-			"Could not open device '%s'.\n"
-			"Maybe you have specified an unknown device or \n"
-			"you are not authorized to do that.\n",
-			info->device);
-		exit(-1);
-	}
-
-	/* get disk geometry */
-	if (ioctl(fd, HDIO_GETGEO, &info->geo) != 0)
-	{
-	        close(fd);
-		zt_error_print("dasdview: ioctl error\n" \
-			"Could not retrieve disk geometry " \
-			"information.");
-		exit(-1);
-	}
-
-	if (ioctl(fd, BLKSSZGET, &info->blksize) != 0)
-	{
-	        close(fd);
-		zt_error_print("dasdview: ioctl error\n" \
-			"Could not retrieve blocksize information!\n");
-		exit(-1);
-	}
-
-	/* get disk information */
-	if (ioctl(fd, BIODASDINFO2, &info->dasd_info) == 0) {
-		info->dasd_info_version = 2;
-	} else {
-		/* INFO2 failed - try INFO using the same (larger) buffer */
-		if (ioctl(fd, BIODASDINFO, &info->dasd_info) != 0) {
-			close(fd);
-			zt_error_print("dasdview: ioctl error\n"	\
-				       "Could not retrieve disk information.");
-			exit(-1);
-		}
-	}
-
-	characteristics = (struct dasd_eckd_characteristics *)
-		&info->dasd_info.characteristics;
-	if (characteristics->no_cyl == LV_COMPAT_CYL &&
-	    characteristics->long_no_cyl)
-		info->hw_cylinders = characteristics->long_no_cyl;
-	else
-		info->hw_cylinders = characteristics->no_cyl;
-	close(fd);
-
-
-	if(u2s_getbusid(info->device, info->busid) == -1)
-		info->busid_valid = 0;
-	else
-		info->busid_valid = 1;
-
-	rc = dasdview_read_attribute(info->busid, "raw_track_access", buffer,
-				sizeof(buffer));
-	if (rc) {
-		zt_error_print("dasdview: Could not retrieve raw_track_access"
-			       " mode information.");
-		return;
-	}
-	if ('1' == buffer[0])
-		info->raw_track_access = 1;
-}
-
-
-static void
-dasdview_parse_input(unsigned long long *p, dasdview_info_t *info, char *s)
+dasdview_parse_input(unsigned long long *p, dasd_info_t *info, char *s)
 {
 	unsigned long long l;
 	char *endp;
@@ -322,7 +231,7 @@ error:
  * Print general DASD information.
  */
 static void
-dasdview_print_general_info(dasdview_info_t *info)
+dasdview_print_general_info(dasd_info_t *info)
 {
 	printf("\n--- general DASD information -----------------" \
 	       "---------------------------------\n");
@@ -400,7 +309,7 @@ dasdview_dump_array(char *name, int size, unsigned char *addr)
  * Print extended DASD information.
  */
 static void
-dasdview_print_extended_info(dasdview_info_t *info)
+dasdview_print_extended_info(dasd_info_t *info)
 {
 	unsigned int i;
 	struct dasd_information2_t *dasd_info;
@@ -476,29 +385,7 @@ dasdview_print_extended_info(dasdview_info_t *info)
 
 
 static void
-dasdview_read_vlabel(dasdview_info_t *info, volume_label_t *vlabel)
-{
-	volume_label_t tmp;
-	unsigned long  pos;
-
-	pos = info->dasd_info.label_block * info->blksize;
-
-	bzero(vlabel, sizeof(volume_label_t));
-	if ((strncmp(info->dasd_info.type, "ECKD", 4) == 0) &&
-	    (!info->dasd_info.FBA_layout)) {
-		/* OS/390 and zOS compatible disk layout */
-		vtoc_read_volume_label(info->device, pos, vlabel);
-	}
-	else {
-		/* standard LINUX disk layout */
-		vtoc_read_volume_label(info->device, pos, &tmp);
-		memcpy(vlabel->vollbl, &tmp, sizeof(tmp)-4);
-	}
-}
-
-
-static void
-dasdview_print_vlabel(dasdview_info_t *info)
+dasdview_print_vlabel(dasd_info_t *info)
 {
 	volume_label_t vlabel;
 	volume_label_t *tmpvlabel;
@@ -517,7 +404,7 @@ dasdview_print_vlabel(dasdview_info_t *info)
 		lzds_dasd_get_vlabel(info->dasd, &tmpvlabel);
 		memcpy(&vlabel, tmpvlabel, sizeof(vlabel));
 	} else
-		dasdview_read_vlabel(info, &vlabel);
+		dasd_read_vlabel(info, &vlabel);
 
 	printf("\n--- volume label -----------------------------" \
 	       "---------------------------------\n");
@@ -634,7 +521,7 @@ dasdview_print_vlabel(dasdview_info_t *info)
 
 
 static void
-dasdview_print_volser(dasdview_info_t *info)
+dasdview_print_volser(dasd_info_t *info)
 {
 	volume_label_t vlabel;
 	volume_label_t *tmpvlabel;
@@ -652,7 +539,7 @@ dasdview_print_volser(dasdview_info_t *info)
 		lzds_dasd_get_vlabel(info->dasd, &tmpvlabel);
 		memcpy(&vlabel, tmpvlabel, sizeof(vlabel));
 	} else
-		dasdview_read_vlabel(info, &vlabel);
+		dasd_read_vlabel(info, &vlabel);
 
 	bzero(vollbl, 5);
 	bzero(volser, 7);
@@ -670,7 +557,7 @@ dasdview_print_volser(dasdview_info_t *info)
 
 
 static void
-dasdview_read_vtoc(dasdview_info_t *info)
+dasdview_read_vtoc(dasd_info_t *info)
 {
         volume_label_t vlabel;
 	format1_label_t tmp;
@@ -834,7 +721,7 @@ static void dasdview_print_format1_8_short_info(format1_label_t *f1,
 	       "-----+--------------+--------------+\n");
 }
 
-static void dasdview_print_vtoc_info(dasdview_info_t *info)
+static void dasdview_print_vtoc_info(dasd_info_t *info)
 {
         int i;
 
@@ -881,7 +768,7 @@ static void dasdview_print_short_info_extent_raw(extent_t *ext)
 }
 
 static void dasdview_print_format1_8_short_info_raw(format1_label_t *f1,
-						    dasdview_info_t *info)
+						    dasd_info_t *info)
 {
 	char s6[7], s13[14], s44[45];
 	unsigned long long j;
@@ -1063,7 +950,7 @@ static void dasdview_print_format1_8_short_info_raw(format1_label_t *f1,
 	printf("\n");
 }
 
-static void dasdview_print_vtoc_info_raw(dasdview_info_t *info)
+static void dasdview_print_vtoc_info_raw(dasd_info_t *info)
 {
 	struct dscbiterator *it;
 	struct dscb *dscb;
@@ -1610,7 +1497,7 @@ static void dasdview_print_vtoc_f9_raw(format9_label_t *f9)
 	dasdview_print_vtoc_f9_nohead(f9);
 }
 
-static void dasdview_print_vtoc_dscb(dasdview_info_t *info, void *dscb)
+static void dasdview_print_vtoc_dscb(dasd_info_t *info, void *dscb)
 {
 	format1_label_t *tmp = dscb;
 
@@ -1651,7 +1538,7 @@ static void dasdview_print_vtoc_dscb(dasdview_info_t *info, void *dscb)
         }
 }
 
-static void dasdview_print_vtoc_f1(dasdview_info_t *info)
+static void dasdview_print_vtoc_f1(dasd_info_t *info)
 {
 	int j;
 
@@ -1670,7 +1557,7 @@ static void dasdview_print_vtoc_f1(dasdview_info_t *info)
 	}
 }
 
-static void dasdview_print_vtoc_f8(dasdview_info_t *info)
+static void dasdview_print_vtoc_f8(dasd_info_t *info)
 {
 	int j;
 
@@ -1689,7 +1576,7 @@ static void dasdview_print_vtoc_f8(dasdview_info_t *info)
 	}
 }
 
-static void dasdview_print_vtoc_f4(dasdview_info_t *info)
+static void dasdview_print_vtoc_f4(dasd_info_t *info)
 {
 	if (info->f4c < 1) {
 		printf("\n--- VTOC format 4 label ----------------------" \
@@ -1700,7 +1587,7 @@ static void dasdview_print_vtoc_f4(dasdview_info_t *info)
 	dasdview_print_vtoc_f4_raw(&info->f4);
 }
 
-static void dasdview_print_vtoc_f5(dasdview_info_t *info)
+static void dasdview_print_vtoc_f5(dasd_info_t *info)
 {
 	if (info->f5c < 1)
 	{
@@ -1712,7 +1599,7 @@ static void dasdview_print_vtoc_f5(dasdview_info_t *info)
 	dasdview_print_vtoc_f5_raw(&info->f5);
 }
 
-static void dasdview_print_vtoc_f7(dasdview_info_t *info)
+static void dasdview_print_vtoc_f7(dasd_info_t *info)
 {
 	if (info->f7c < 1)
 	{
@@ -1724,7 +1611,7 @@ static void dasdview_print_vtoc_f7(dasdview_info_t *info)
 	dasdview_print_vtoc_f7_raw(&info->f7);
 }
 
-static void dasdview_print_vtoc_f9(dasdview_info_t *info)
+static void dasdview_print_vtoc_f9(dasd_info_t *info)
 {
 	int j;
 
@@ -1751,7 +1638,7 @@ static void dasdview_print_vtoc_f3(void)
 	return;
 }
 
-static void dasdview_print_vtoc_standard(dasdview_info_t *info)
+static void dasdview_print_vtoc_standard(dasd_info_t *info)
 {
 	dasdview_read_vtoc(info);
 
@@ -1781,7 +1668,7 @@ static void dasdview_print_vtoc_standard(dasdview_info_t *info)
 }
 
 /* a simple routine to print all records in the vtoc */
-static void dasdview_print_vtoc_raw(dasdview_info_t *info)
+static void dasdview_print_vtoc_raw(dasd_info_t *info)
 {
 	struct dscbiterator *it;
 	struct dscb *record;
@@ -1823,7 +1710,7 @@ static void dasdview_print_vtoc_raw(dasdview_info_t *info)
 	lzds_dscbiterator_free(it);
 }
 
-static void dasdview_print_vtoc(dasdview_info_t *info)
+static void dasdview_print_vtoc(dasd_info_t *info)
 {
 	if (info->raw_track_access)
 		dasdview_print_vtoc_raw(info);
@@ -1890,7 +1777,7 @@ dasdview_print_format2(unsigned int size, unsigned char *dumpstr,
 	return 0;
 }
 
-static void dasdview_view_standard(dasdview_info_t *info)
+static void dasdview_view_standard(dasd_info_t *info)
 {
 	unsigned char  dumpstr[DUMP_STRING_SIZE];
 	unsigned long long i=0, j=0, k=0, count=0;
@@ -2164,7 +2051,7 @@ static void dasdview_print_raw_track(char *trackdata,
 	} while (1);
 }
 
-static void dasdview_view_raw(dasdview_info_t *info)
+static void dasdview_view_raw(dasd_info_t *info)
 {
 	u_int64_t residual, trckstart, trckend, track, trckbuffsize;
 	u_int64_t tracks_to_read, trckcount, i;
@@ -2231,7 +2118,7 @@ static void dasdview_view_raw(dasdview_info_t *info)
 	}
 }
 
-static void dasdview_view(dasdview_info_t *info)
+static void dasdview_view(dasd_info_t *info)
 {
 	if (info->raw_track_access)
 		dasdview_view_raw(info);
@@ -2240,7 +2127,7 @@ static void dasdview_view(dasdview_info_t *info)
 }
 
 static void
-dasdview_print_characteristic(dasdview_info_t *info)
+dasdview_print_characteristic(dasd_info_t *info)
 {
 	dasd_information2_t dasd_info;
 	dasd_info = info->dasd_info;
@@ -2252,7 +2139,7 @@ dasdview_print_characteristic(dasdview_info_t *info)
 
 int main(int argc, char * argv[]) {
 
-	dasdview_info_t info;
+	dasd_info_t info;
 	int oc;
 	unsigned long long max=0LL;
 	char *begin_param_str = NULL;
@@ -2370,7 +2257,11 @@ int main(int argc, char * argv[]) {
 	if (info.device_id < argc)
 		strcpy(info.device, argv[info.device_id]);
 
-	dasdview_get_info(&info);
+	if (dasd_get_info(&info) != 0) {
+		zt_error_print("dasdview: could not get dasd information\n");
+		exit(EXIT_FAILURE);
+	}
+
 	if (info.raw_track_access) {
 		rc = lzds_zdsroot_alloc(&info.zdsroot);
 		if (rc) {
